@@ -1,0 +1,29 @@
+{
+  "units": "mm",
+  "total_height": 150.0,
+  "base_width": 50.0,
+  "plinth_height": 8.0,
+  "shaft_start_width": 41.0,
+  "shoulder_z": 122.0,
+  "shoulder_width": 27.0,
+  "ribbon": {
+    "start_z": 18.0,
+    "end_z": 132.0,
+    "turns": 1.5,
+    "width": 7.0,
+    "thickness": 2.4,
+    "clearance": 2.2,
+    "samples": 145
+  },
+  "crystal": {
+    "height": 72.0,
+    "circumradius": 7.0,
+    "base_z": 28.0,
+    "offset_x": 2.0,
+    "offset_y": -1.0
+  },
+  "parameter_behaviour": {
+    "macro_constants": "authoritative; rerunning the macro regenerates geometry",
+    "document_properties": "editable metadata only; changes require copying to the macro and rerunning"
+  }
+}

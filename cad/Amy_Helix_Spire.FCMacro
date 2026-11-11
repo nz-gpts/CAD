@@ -1,0 +1,322 @@
+"""Build and validate Amy's Helix Spire in FreeCAD 1.1.x.
+
+The values in the PARAMETERS block are the authoritative generation inputs.
+Document properties are provided for inspection/editing, but changing them does
+not rebuild geometry: rerun this macro after changing this block (or generate
+the block from cad/Amy_Helix_Spire_parameters.json).
+"""
+
+import math
+import os
+
+import FreeCAD as App
+import Part
+
+
+# --------------------------- PARAMETERS (mm) ---------------------------
+TOTAL_HEIGHT = 150.0
+BASE_WIDTH = 50.0
+PLINTH_HEIGHT = 8.0
+SHAFT_START_WIDTH = 41.0
+SHOULDER_Z = 122.0
+SHOULDER_WIDTH = 27.0
+
+RIBBON_START_Z = 18.0
+RIBBON_END_Z = 132.0
+RIBBON_TURNS = 1.5
+RIBBON_WIDTH = 7.0
+RIBBON_THICKNESS = 2.4
+RIBBON_CLEARANCE = 2.2
+RIBBON_SAMPLES = 145
+
+CRYSTAL_HEIGHT = 72.0
+CRYSTAL_RADIUS = 7.0
+CRYSTAL_Z = 28.0
+CRYSTAL_OFFSET_X = 2.0
+CRYSTAL_OFFSET_Y = -1.0
+
+PROJECT_DIR = "/home/amy/Projects/amy-helix-spire"
+OUTPUT_PATH = os.path.join(PROJECT_DIR, "cad", "Amy_Helix_Spire.FCStd")
+# ----------------------------------------------------------------------
+
+
+def centred_square_wire(width, z):
+    h = width / 2.0
+    points = [
+        App.Vector(-h, -h, z),
+        App.Vector(h, -h, z),
+        App.Vector(h, h, z),
+        App.Vector(-h, h, z),
+    ]
+    return Part.makePolygon(points + [points[0]])
+
+
+def centred_box(width, height, z):
+    return Part.makeBox(
+        width, width, height, App.Vector(-width / 2.0, -width / 2.0, z)
+    )
+
+
+def make_decorative_base():
+    # Three nested tiers fill the specified 8 mm plinth envelope.
+    lower = centred_box(BASE_WIDTH, 3.0, 0.0)
+    middle = centred_box(46.0, 3.0, 3.0)
+    upper = centred_box(SHAFT_START_WIDTH, 2.0, 6.0)
+    return lower.fuse(middle).fuse(upper).removeSplitter()
+
+
+def make_resin_body():
+    lower = Part.makeLoft(
+        [
+            centred_square_wire(SHAFT_START_WIDTH, PLINTH_HEIGHT),
+            centred_square_wire(SHOULDER_WIDTH, SHOULDER_Z),
+        ],
+        True,
+        False,
+    )
+
+    h = SHOULDER_WIDTH / 2.0
+    base = [
+        App.Vector(-h, -h, SHOULDER_Z),
+        App.Vector(h, -h, SHOULDER_Z),
+        App.Vector(h, h, SHOULDER_Z),
+        App.Vector(-h, h, SHOULDER_Z),
+    ]
+    apex = App.Vector(0.0, 0.0, TOTAL_HEIGHT)
+    faces = [Part.Face(Part.makePolygon(base + [base[0]]))]
+    for i in range(4):
+        triangle = [base[i], base[(i + 1) % 4], apex, base[i]]
+        faces.append(Part.Face(Part.makePolygon(triangle)))
+    pyramid = Part.makeSolid(Part.makeShell(faces))
+    return lower.fuse(pyramid).removeSplitter()
+
+
+def square_half_width_at_z(z):
+    if z <= SHOULDER_Z:
+        fraction = (z - PLINTH_HEIGHT) / (SHOULDER_Z - PLINTH_HEIGHT)
+        return 0.5 * (
+            SHAFT_START_WIDTH
+            + fraction * (SHOULDER_WIDTH - SHAFT_START_WIDTH)
+        )
+    fraction = (TOTAL_HEIGHT - z) / (TOTAL_HEIGHT - SHOULDER_Z)
+    return 0.5 * SHOULDER_WIDTH * fraction
+
+
+def ribbon_centre(t):
+    """Centreline point using rotated-ray intersection with the square taper."""
+    theta = 2.0 * math.pi * RIBBON_TURNS * t
+    z = RIBBON_START_Z + (RIBBON_END_Z - RIBBON_START_Z) * t
+    c, s = math.cos(theta), math.sin(theta)
+    # A ray (r*c, r*s) reaches the square when max(|x|, |y|) == half width.
+    surface_r = square_half_width_at_z(z) / max(abs(c), abs(s))
+    centre_r = surface_r + RIBBON_CLEARANCE + RIBBON_THICKNESS / 2.0
+    return App.Vector(centre_r * c, centre_r * s, z)
+
+
+def ribbon_section(t):
+    point = ribbon_centre(t)
+    dt = 1.0e-4
+    before = ribbon_centre(max(0.0, t - dt))
+    after = ribbon_centre(min(1.0, t + dt))
+    tangent = after.sub(before)
+    tangent.normalize()
+
+    radial = App.Vector(point.x, point.y, 0.0)
+    radial.normalize()
+    # Project radial direction into the normal plane of the path.
+    normal = radial.sub(tangent.multiply(radial.dot(tangent)))
+    normal.normalize()
+    across = tangent.cross(normal)
+    across.normalize()
+
+    n = normal.multiply(RIBBON_THICKNESS / 2.0)
+    b = across.multiply(RIBBON_WIDTH / 2.0)
+    corners = [
+        point.add(n).add(b),
+        point.sub(n).add(b),
+        point.sub(n).sub(b),
+        point.add(n).sub(b),
+    ]
+    return Part.makePolygon(corners + [corners[0]])
+
+
+def make_helix_ribbon():
+    sections = [
+        ribbon_section(float(i) / (RIBBON_SAMPLES - 1))
+        for i in range(RIBBON_SAMPLES)
+    ]
+    return Part.makeLoft(sections, True, False)
+
+
+def make_crystal_core():
+    points = []
+    for i in range(6):
+        angle = math.radians(30.0 + 60.0 * i)
+        points.append(
+            App.Vector(
+                CRYSTAL_OFFSET_X + CRYSTAL_RADIUS * math.cos(angle),
+                CRYSTAL_OFFSET_Y + CRYSTAL_RADIUS * math.sin(angle),
+                CRYSTAL_Z,
+            )
+        )
+    face = Part.Face(Part.makePolygon(points + [points[0]]))
+    return face.extrude(App.Vector(0.0, 0.0, CRYSTAL_HEIGHT))
+
+
+def add_length(obj, name, value, group, description):
+    obj.addProperty("App::PropertyLength", name, group, description)
+    setattr(obj, name, value)
+
+
+def add_parameters(doc):
+    params = doc.addObject("App::FeaturePython", "Parameters")
+    params.Label = "Parameters (rerun macro to regenerate)"
+    params.addProperty(
+        "App::PropertyString",
+        "RegenerationNote",
+        "Status",
+        "Explains whether property edits update the model",
+    )
+    params.RegenerationNote = (
+        "Inspection/editing values only; geometry is not live-linked. "
+        "Copy edits to the macro PARAMETERS block and rerun."
+    )
+    for name, value, group in [
+        ("TotalHeight", TOTAL_HEIGHT, "Main"),
+        ("BaseWidth", BASE_WIDTH, "Main"),
+        ("PlinthHeight", PLINTH_HEIGHT, "Main"),
+        ("ShaftStartWidth", SHAFT_START_WIDTH, "Main"),
+        ("ShoulderZ", SHOULDER_Z, "Main"),
+        ("ShoulderWidth", SHOULDER_WIDTH, "Main"),
+        ("RibbonStartZ", RIBBON_START_Z, "Ribbon"),
+        ("RibbonEndZ", RIBBON_END_Z, "Ribbon"),
+        ("RibbonWidth", RIBBON_WIDTH, "Ribbon"),
+        ("RibbonThickness", RIBBON_THICKNESS, "Ribbon"),
+        ("RibbonClearance", RIBBON_CLEARANCE, "Ribbon"),
+        ("CrystalHeight", CRYSTAL_HEIGHT, "Crystal"),
+        ("CrystalRadius", CRYSTAL_RADIUS, "Crystal"),
+        ("CrystalOffsetX", CRYSTAL_OFFSET_X, "Crystal"),
+        ("CrystalOffsetY", CRYSTAL_OFFSET_Y, "Crystal"),
+    ]:
+        add_length(params, name, value, group, "Macro generation input")
+    params.addProperty("App::PropertyFloat", "RibbonTurns", "Ribbon")
+    params.RibbonTurns = RIBBON_TURNS
+    params.addProperty("App::PropertyInteger", "RibbonSamples", "Ribbon")
+    params.RibbonSamples = RIBBON_SAMPLES
+    return params
+
+
+def add_component(doc, name, label, shape, colour, transparency=0):
+    obj = doc.addObject("PartDesign::Feature", name)
+    obj.Label = label
+    obj.Shape = shape
+    obj.addProperty("App::PropertyString", "ComponentRole", "Identity")
+    obj.ComponentRole = name
+    if hasattr(obj, "ViewObject") and obj.ViewObject is not None:
+        obj.ViewObject.ShapeColor = colour
+        obj.ViewObject.Transparency = transparency
+    return obj
+
+
+def shape_checks(name, shape):
+    return {
+        name + ".non_null": not shape.isNull(),
+        name + ".valid": shape.isValid(),
+        name + ".closed": shape.isClosed(),
+        name + ".solid_count_1": len(shape.Solids) == 1,
+        name + ".positive_volume": shape.Volume > 0.0,
+    }
+
+
+def validate(shapes):
+    checks = {}
+    for name, shape in shapes.items():
+        checks.update(shape_checks(name, shape))
+
+    compound = Part.makeCompound(list(shapes.values()))
+    box = compound.BoundBox
+    tolerance = 1.0e-5
+    checks["assembly.height_150"] = abs(box.ZLength - TOTAL_HEIGHT) < tolerance
+    checks["assembly.footprint_x_50"] = abs(box.XLength - BASE_WIDTH) < tolerance
+    checks["assembly.footprint_y_50"] = abs(box.YLength - BASE_WIDTH) < tolerance
+    checks["assembly.z_min_0"] = abs(box.ZMin) < tolerance
+
+    # Analytic centreline check: each sample remains exactly the requested
+    # radial clearance plus half-thickness beyond its rotated-ray intersection.
+    clearance_errors = []
+    for i in range(RIBBON_SAMPLES):
+        t = float(i) / (RIBBON_SAMPLES - 1)
+        p = ribbon_centre(t)
+        theta = 2.0 * math.pi * RIBBON_TURNS * t
+        surface_r = square_half_width_at_z(p.z) / max(
+            abs(math.cos(theta)), abs(math.sin(theta))
+        )
+        actual = math.sqrt(p.x * p.x + p.y * p.y) - surface_r
+        clearance_errors.append(
+            abs(actual - (RIBBON_CLEARANCE + RIBBON_THICKNESS / 2.0))
+        )
+    checks["ribbon.square_taper_centreline"] = max(clearance_errors) < 1.0e-8
+    checks["ribbon.z_range"] = (
+        shapes["HelixRibbon"].BoundBox.ZMin < RIBBON_START_Z + RIBBON_WIDTH
+        and shapes["HelixRibbon"].BoundBox.ZMax > RIBBON_END_Z - RIBBON_WIDTH
+    )
+    ribbon_body_common = shapes["HelixRibbon"].common(shapes["ResinBody"])
+    ribbon_body_distance = shapes["HelixRibbon"].distToShape(shapes["ResinBody"])[0]
+    checks["ribbon.no_body_overlap"] = ribbon_body_common.Volume < 1.0e-7
+    checks["ribbon.positive_body_clearance"] = ribbon_body_distance > 1.0e-5
+    crystal = shapes["CrystalCore"]
+    body = shapes["ResinBody"]
+    crystal_body_common = crystal.common(body)
+    boundary_clearance = crystal.distToShape(body)[0]
+    checks["crystal.fully_inside_body"] = (
+        not crystal_body_common.isNull()
+        and abs(crystal_body_common.Volume - crystal.Volume) < 1.0e-5
+    )
+    checks["crystal.no_boundary_contact"] = boundary_clearance > 1.0e-5
+    checks["crystal.boundary_clearance_over_1mm"] = boundary_clearance > 1.0
+    return checks, box
+
+
+def build():
+    old = App.listDocuments().get("Amy_Helix_Spire")
+    if old is not None:
+        App.closeDocument(old.Name)
+    doc = App.newDocument("Amy_Helix_Spire", "Amy Helix Spire")
+    add_parameters(doc)
+
+    shapes = {
+        "DecorativeBase": make_decorative_base(),
+        "ResinBody": make_resin_body(),
+        "HelixRibbon": make_helix_ribbon(),
+        "CrystalCore": make_crystal_core(),
+    }
+    add_component(doc, "DecorativeBase", "Decorative Base", shapes["DecorativeBase"], (0.35, 0.18, 0.55))
+    add_component(doc, "ResinBody", "Resin Body", shapes["ResinBody"], (0.72, 0.48, 0.90), 35)
+    add_component(doc, "HelixRibbon", "Helix Ribbon", shapes["HelixRibbon"], (0.95, 0.72, 0.22))
+    add_component(doc, "CrystalCore", "Crystal Core", shapes["CrystalCore"], (0.35, 0.85, 1.00), 15)
+    doc.recompute()
+
+    checks, box = validate(shapes)
+    print("AMY_HELIX_VALIDATION_BEGIN")
+    for key in sorted(checks):
+        print("CHECK {}={}".format(key, "PASS" if checks[key] else "FAIL"))
+    print(
+        "BOUNDS X={:.6f} Y={:.6f} Z={:.6f} XMIN={:.6f} YMIN={:.6f} ZMIN={:.6f}".format(
+            box.XLength, box.YLength, box.ZLength, box.XMin, box.YMin, box.ZMin
+        )
+    )
+    for name in sorted(shapes):
+        print("VOLUME {}={:.6f}".format(name, shapes[name].Volume))
+    print("AMY_HELIX_VALIDATION_END")
+
+    failed = [key for key, passed in checks.items() if not passed]
+    if failed:
+        raise RuntimeError("Validation failed; FCStd not saved: " + ", ".join(failed))
+    doc.recompute()
+    doc.saveAs(OUTPUT_PATH)
+    print("SAVED " + OUTPUT_PATH)
+    return doc
+
+
+DOC = build()
+
